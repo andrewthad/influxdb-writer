@@ -21,46 +21,52 @@ module Database.Influx.Write
   , disconnected
   ) where
 
-import Data.Char (ord)
+import Control.Exception (mask,onException)
 import Control.Monad.ST (ST)
-import GHC.Exts (RealWorld,Addr#)
-import Foreign.C.Types (CInt)
-import Foreign.Ptr (Ptr)
-import Data.Vector (Vector)
-import Data.Word (Word8,Word16,Word64)
 import Data.Bytes.Types (MutableBytes(..))
+import Data.Char (ord)
 import Data.Primitive (ByteArray,MutableByteArray)
-import Data.Primitive.Unlifted.Array (UnliftedArray)
 import Data.Primitive.ByteArray.Offset (MutableByteArrayOffset(..))
 import Data.Primitive.Unlifted.Array (MutableUnliftedArray(..))
+import Data.Primitive.Unlifted.Array (UnliftedArray)
+import Data.Vector (Vector)
+import Data.Word (Word8,Word16,Word64)
 import Database.Influx.LineProtocol(Point,encodePoint)
+import Foreign.C.Types (CInt)
+import Foreign.Ptr (Ptr)
 import GHC.Exts (Ptr(..))
+import GHC.Exts (RealWorld,Addr#)
 import Net.Types (IPv4(..))
-import Control.Exception (mask,onException)
 import Socket.Stream.IPv4 (Connection,Peer(..))
-import Socket.Stream.IPv4 (Interruptibility(Uninterruptible),CloseException)
 import Socket.Stream.IPv4 (Family(Internet),Version(V4))
-import qualified Data.Bytes.Unsliced as BUS
-import qualified GHC.Exts as Exts
+import Socket.Stream.IPv4 (Interruptibility(Uninterruptible),CloseException)
 import qualified Data.ByteArray.Builder.Small as BB
 import qualified Data.ByteArray.Builder.Small.Unsafe as BBU
-import qualified Data.Vector as V
+import qualified Data.ByteString.Unsafe as BU
 import qualified Data.Primitive as PM
-import qualified Data.Primitive.Ptr as PM
 import qualified Data.Primitive.Addr as PM
-import qualified Net.IPv4 as IPv4
 import qualified Data.Primitive.ByteArray.Unaligned as PM
+import qualified Data.Primitive.Ptr as PM
 import qualified Data.Primitive.Unlifted.Array as PM
+import qualified Data.Vector as V
+import qualified GHC.Exts as Exts
+import qualified Net.IPv4 as IPv4
 import qualified Socket.Stream.IPv4 as SCK
 import qualified Socket.Stream.Uninterruptible.MutableBytes as SMB
 import qualified System.IO as IO
+
+fromByteString :: ByteString -> IO ByteArray
+fromByteString b = BU.unsafeUseAsCStringLen b $ \((Ptr addr#),sz) -> do
+  m <- PM.newByteArray sz
+  PM.copyAddrToByteArray m 0 (PM.Addr addr#) sz
+  PM.unsafeFreezeByteArray m
 
 -- Implementation Notes:
 -- InfluxDB does not support http request pipelining. Consequently,
 -- we always wait for a response before sending the next request.
 -- We use chunked encoding rather aggressively to try to improve
 -- locality. We continually render the data points to the same
--- mutable byte array before sending them out. 
+-- mutable byte array before sending them out.
 
 -- | An exception while writing to InfluxDB. This includes
 -- several stream socket exceptions (connecting or sending
@@ -73,7 +79,7 @@ data InfluxException
   | ResponseException
 
 data Influx = Influx
-  !(MutableByteArray RealWorld) 
+  !(MutableByteArray RealWorld)
   -- Inside this mutable byte array, we have:
   -- * Reconnection count: Word64
   -- * Active connection: SCK.Connection (CInt), given 64 bits of space
@@ -99,7 +105,7 @@ c2w = fromIntegral . ord
 encodeHttpHeaders ::
      ByteArray -- Encoded host
   -> ByteArray -- Database
-  -> BB.Builder 
+  -> BB.Builder
 encodeHttpHeaders host db = BB.construct $ \(MutableBytes arr off len) -> do
   let requiredBytes = 0
         + PM.sizeofByteArray host
@@ -228,7 +234,7 @@ open Peer{address,port} = do
   PM.writeUnalignedByteArray arr 16 (getIPv4 address)
   PM.writeUnalignedByteArray arr 20 port
   PM.writeUnalignedByteArray arr 22 (0 :: Word16)
-  peerDescr <- BUS.fromByteString (IPv4.encodeUtf8 address)
+  peerDescr <- fromByteString (IPv4.encodeUtf8 address)
   bufRef <- PM.unsafeNewUnliftedArray 1
   PM.writeUnliftedArray bufRef 0 =<< PM.newByteArray minimumBufferSize
   pure (Influx arr peerDescr bufRef)
@@ -373,9 +379,9 @@ connect !inf = do
 -- function has no effect. Note that it is not necessary to
 -- call this function in order to use this library. It useful
 -- as an optimization in either of these scenarios:
--- 
+--
 -- * The user knows that another request will not be made for a
---   long time. 
+--   long time.
 -- * There is a load balancer in front of an InfluxDB cluster.
 disconnected :: Influx -> IO (Either SCK.CloseException ())
 disconnected inf = readActiveConnection inf >>= \case
@@ -431,7 +437,7 @@ receiveResponseStage1 conn arr = do
         else pure $! (arr, Left ResponseException)
 
 -- Precondition: ix >= 4
-receiveResponseStage2 :: 
+receiveResponseStage2 ::
      Connection
   -> MutableByteArray RealWorld
   -> Int -- Index
