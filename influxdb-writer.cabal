@@ -1,0 +1,43 @@
+cabal-version: 2.2
+name: influxdb-writer
+version: 0.1.0.0
+synopsis: Influxdb Writer
+description:
+  Write measurements to InfluxDB. This is very optimized. It does
+  not use `http-client`. There is at most a single TCP connection
+  to InfluxDB at a time. There is no connection pooling, and there
+  are no worker threads running in the background.
+homepage: https://github.com/andrewthad/influxdb-writer
+bug-reports: https://github.com/andrewthad/influxdb-writer/issues
+license: BSD-3-Clause
+license-file: LICENSE
+author: Andrew Martin
+maintainer: andrew.thaddeus@gmail.com
+copyright: 2019 Andrew Martin
+category: Database
+extra-source-files: CHANGELOG.md
+
+library
+  exposed-modules: Database.Influx.Write
+  build-depends:
+    , base >=4.12.0.0 && <5
+    , influxdb-line-protocol >=0.1 && <0.2
+    , primitive-checked >=0.7 && <0.8
+    , small-bytearray-builder >=0.1 && <0.2
+    , byteslice >=0.1.1 && <0.2
+    , ip >=1.5 && <1.6
+    , sockets >=0.4 && <0.5
+    , vector >=0.12.0.3 && <0.13
+    , primitive-addr >=0.1.0.1 && <0.2
+    , primitive-offset >=0.2 && <0.3
+    , primitive-unlifted >=0.1.1 && <0.2
+    , primitive-unaligned >=0.1.1 && <0.2
+  hs-source-dirs: src
+  default-language: Haskell2010
+
+test-suite influxdb-writer-test
+  default-language:    Haskell2010
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             MyLibTest.hs
+  build-depends:       base ^>=4.12.0.0

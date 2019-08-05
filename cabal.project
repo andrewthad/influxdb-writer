@@ -1,0 +1,1 @@
+packages: . ../influxdb-line-protocol ../small-bytearray-builder ../sockets ../byteslice ../posix-api
