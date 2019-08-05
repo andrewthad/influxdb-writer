@@ -19,6 +19,8 @@ module Database.Influx.Write
     -- * Explicit Connection
   , connected
   , disconnected
+    -- * Exceptions
+  , InfluxException(..)
   ) where
 
 import Control.Exception (mask,onException)
