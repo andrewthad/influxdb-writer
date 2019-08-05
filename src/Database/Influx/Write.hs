@@ -106,7 +106,7 @@ c2w = fromIntegral . ord
 
 w2c :: Word8 -> Char
 {-# inline w2c #-}
-w2c = fromIntegral . chr
+w2c = chr . fromIntegral
 
 -- This always starts writing at postion 0 in the destination
 -- buffer. This includes both the request line and the headers.
