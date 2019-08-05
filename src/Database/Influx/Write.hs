@@ -27,7 +27,7 @@ import Control.Exception (mask,onException)
 import Control.Monad.ST (ST)
 import Data.Bytes.Types (MutableBytes(..))
 import Data.ByteString (ByteString)
-import Data.Char (ord)
+import Data.Char (chr,ord)
 import Data.Primitive (ByteArray,MutableByteArray)
 import Data.Primitive.ByteArray.Offset (MutableByteArrayOffset(..))
 import Data.Primitive.Unlifted.Array (MutableUnliftedArray(..))
@@ -80,6 +80,7 @@ data InfluxException
   | SendException (SCK.SendException 'Uninterruptible)
   | ReceiveException (SCK.ReceiveException 'Uninterruptible)
   | ResponseException
+  deriving (Eq, Show)
 
 data Influx = Influx
   !(MutableByteArray RealWorld)
@@ -102,6 +103,10 @@ newtype Database = Database ByteArray
 c2w :: Char -> Word8
 {-# inline c2w #-}
 c2w = fromIntegral . ord
+
+w2c :: Word8 -> Char
+{-# inline w2c #-}
+w2c = fromIntegral . chr
 
 -- This always starts writing at postion 0 in the destination
 -- buffer. This includes both the request line and the headers.
@@ -438,7 +443,9 @@ receiveResponseStage1 conn arr = do
             && c2w '4' == c11
       if success
         then receiveResponseStage2 conn arr n sz
-        else pure $! (arr, Left ResponseException)
+        else do
+          putStrLn $ map w2c [c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11]
+          pure $! (arr, Left ResponseException)
 
 -- Precondition: ix >= 4
 receiveResponseStage2 ::
