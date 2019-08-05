@@ -24,6 +24,7 @@ module Database.Influx.Write
 import Control.Exception (mask,onException)
 import Control.Monad.ST (ST)
 import Data.Bytes.Types (MutableBytes(..))
+import Data.ByteString (ByteString)
 import Data.Char (ord)
 import Data.Primitive (ByteArray,MutableByteArray)
 import Data.Primitive.ByteArray.Offset (MutableByteArrayOffset(..))
