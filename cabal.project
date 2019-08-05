@@ -1,1 +1,14 @@
-packages: . ../influxdb-line-protocol ../small-bytearray-builder ../sockets ../byteslice ../posix-api
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/andrewthad/influxdb-line-protocol
+  tag: 576bf069a381b77dabfc2a771fdeb58fc637995a
+source-repository-package
+  type: git
+  location: https://github.com/andrewthad/small-bytearray-builder
+  tag: 1fd4b3ab1e066cb07506ea1eb4de57fe97ce94da
+source-repository-package
+  type: git
+  location: https://github.com/andrewthad/sockets
+  tag: 3a87ec2a2828cde91d14a7c95ba470c0916037c0

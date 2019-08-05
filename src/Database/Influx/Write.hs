@@ -259,7 +259,8 @@ write !inf@(Influx _ peerDescr bufRef) (Database db) !points0 = getConnection in
         bufSz0 = minimumBufferSize
     buf0 <- PM.readUnliftedArray bufRef 0
     MutableByteArrayOffset{array=buf1,offset=i0} <- BB.pasteGrowIO
-      4096 (encodeHttpHeaders host db) buf0
+      4096 (encodeHttpHeaders host db)
+      (MutableByteArrayOffset{array=buf0,offset=0})
     -- We reserve 18 bytes for the hexadecimal encoding of a
     -- length that is at most 32 bits and the CRLF after it.
     let i1 = i0 + (16 + 2)
@@ -369,7 +370,7 @@ connect !inf = do
   port <- readPeerPort inf
   -- TODO: mask exceptions
   SCK.connect (Peer{address,port}) >>= \case
-    Left err -> error "uheotnhun"
+    Left err -> pure (Left err)
     Right conn -> do
       writeActiveConnection inf conn
       incrementConnectionCount inf
