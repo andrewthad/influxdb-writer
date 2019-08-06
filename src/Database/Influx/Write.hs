@@ -76,10 +76,11 @@ fromByteString b = BU.unsafeUseAsCStringLen b $ \((Ptr addr#),sz) -> do
 -- could fail). It also includes the possibility that the
 -- HTTP response code is something other than 204.
 data InfluxException
-  = ConnectException (SCK.ConnectException ('Internet 'V4) 'Uninterruptible)
-  | SendException (SCK.SendException 'Uninterruptible)
-  | ReceiveException (SCK.ReceiveException 'Uninterruptible)
-  | ResponseException
+  = ConnectException (SCK.ConnectException ('Internet 'V4) 'Uninterruptible) -- ^ There was an exception encountered when trying to connection to an 'Influx' 'Database'.
+  | SendException (SCK.SendException 'Uninterruptible) -- ^ There was an exception when trying to send something to an 'Influx' 'Database'.
+  | ReceiveException (SCK.ReceiveException 'Uninterruptible) -- ^ There was an exception encountered when trying to receive a response from an 'Influx' 'Database'.
+  | ResponseException -- ^ We received a non-204 HTTP response code.
+  | WriteSizeZeroException -- ^ We tried to write a vector of size 0.
   deriving (Eq, Show)
 
 data Influx = Influx
@@ -258,88 +259,91 @@ write ::
   -> Database -- ^ Database name
   -> Vector Point -- ^ Data points
   -> IO (Either InfluxException ())
-write !inf@(Influx _ peerDescr bufRef) (Database db) !points0 = getConnection inf >>= \case
-  Left err -> pure $! Left $! ConnectException err
-  Right conn -> do
-    -- TODO: escape the database name correctly
-    let host = peerDescr
-        bufSz0 = minimumBufferSize
-    buf0 <- PM.readUnliftedArray bufRef 0
-    MutableByteArrayOffset{array=buf1,offset=i0} <- BB.pasteGrowIO
-      4096 (encodeHttpHeaders host db)
-      (MutableByteArrayOffset{array=buf0,offset=0})
-    -- We reserve 18 bytes for the hexadecimal encoding of a
-    -- length that is at most 32 bits and the CRLF after it.
-    let i1 = i0 + (16 + 2)
-    let go :: Int -- starting offset, zero after first run
-           -> Vector Point
-           -> MutableBytes RealWorld
-           -> IO (MutableByteArray RealWorld, Either InfluxException ())
-        go !off0 !points !buf@MutableBytes{array=bufArr} = if V.null points
-          then pure (bufArr, Right ())
-          else do
-            -- This slice into the buffer represents the unused bytes,
-            -- not the ones that were successfully written to. This
-            -- is a little backwards from what one might imagine. By
-            -- taking the offset to be 0 and the length to be the returned
-            -- offset, we can get the slice that has been written to.
-            (!pointsNext,MutableBytes barrNext ixNext _) <-
-              BB.pasteArrayIO buf encodePoint points
-            bufSpace <- PM.getSizeofMutableByteArray barrNext
-            if V.length pointsNext == V.length points
-              then do
-                barrNext' <- PM.resizeMutableByteArray barrNext (bufSpace + 4096)
-                go off0 pointsNext (MutableBytes barrNext' 0 (bufSpace + (4096 - 2)))
+write !inf@(Influx _ peerDescr bufRef) (Database db) = \ !points0 ->
+  if V.length points0 == 0
+    then pure $! Left $! WriteSizeZeroException
+    else getConnection inf >>= \case
+      Left err -> pure $! Left $! ConnectException err
+      Right conn -> do
+        -- TODO: escape the database name correctly
+        let host = peerDescr
+            bufSz0 = minimumBufferSize
+        buf0 <- PM.readUnliftedArray bufRef 0
+        MutableByteArrayOffset{array=buf1,offset=i0} <- BB.pasteGrowIO
+          4096 (encodeHttpHeaders host db)
+          (MutableByteArrayOffset{array=buf0,offset=0})
+        -- We reserve 18 bytes for the hexadecimal encoding of a
+        -- length that is at most 32 bits and the CRLF after it.
+        let i1 = i0 + (16 + 2)
+        let go :: Int -- starting offset, zero after first run
+               -> Vector Point
+               -> MutableBytes RealWorld
+               -> IO (MutableByteArray RealWorld, Either InfluxException ())
+            go !off0 !points !buf@MutableBytes{array=bufArr} = if V.null points
+              then pure (bufArr, Right ())
               else do
-                -- We take pains to ensure that there are always two
-                -- unused bytes at the end of the array. This gives
-                -- us the space we need for the CRLF.
-                PM.writeByteArray barrNext ixNext (c2w '\r')
-                PM.writeByteArray barrNext (ixNext + 1) (c2w '\n')
-                -- Now, we go back to the beginning of byte array and write
-                -- the hex-encoded length. We do not know the length in advance,
-                -- so we write it out after running the builder.
-                off <- BBU.pasteIO
-                  (BBU.word64PaddedUpperHex (fromIntegral (ixNext - off0 - (16 + 2))))
-                  barrNext
-                  off0
-                PM.writeByteArray barrNext off (c2w '\r')
-                PM.writeByteArray barrNext (off + 1) (c2w '\n')
-                SMB.send conn (MutableBytes barrNext 0 (ixNext + 2)) >>= \case
-                  Left err -> pure (barrNext,Left (SendException err))
-                  Right (_ :: ()) -> go 0 pointsNext
-                    (MutableBytes barrNext (16 + 2) (bufSpace - (2 + 16 + 2)))
-    !len1 <- fmap (\x -> x - i1) (PM.getSizeofMutableByteArray buf1)
-    -- Discard the possibly enlarged buffer.
-    -- TODO: Store this buffer for reuse.
-    go i0 points0 (MutableBytes buf1 i1 (len1 - 2)) >>= \case
-      (bufNew, Right (_ :: ())) -> do
-        -- It would be really nice if we could avoid making
-        -- a syscall just to push out these five additional bytes.
-        -- However, there is not a terribly elegant way to do this.
-        -- For now, we opt for simplicity.
-        PM.writeByteArray bufNew 0 (c2w '0')
-        PM.writeByteArray bufNew 1 (c2w '\r')
-        PM.writeByteArray bufNew 2 (c2w '\n')
-        PM.writeByteArray bufNew 3 (c2w '\r')
-        PM.writeByteArray bufNew 4 (c2w '\n')
-        SMB.send conn (MutableBytes bufNew 0 5) >>= \case
-          Left err -> do
+                -- This slice into the buffer represents the unused bytes,
+                -- not the ones that were successfully written to. This
+                -- is a little backwards from what one might imagine. By
+                -- taking the offset to be 0 and the length to be the returned
+                -- offset, we can get the slice that has been written to.
+                (!pointsNext,MutableBytes barrNext ixNext _) <-
+                  BB.pasteArrayIO buf encodePoint points
+                bufSpace <- PM.getSizeofMutableByteArray barrNext
+                if V.length pointsNext == V.length points
+                  then do
+                    barrNext' <- PM.resizeMutableByteArray barrNext (bufSpace + 4096)
+                    go off0 pointsNext (MutableBytes barrNext' 0 (bufSpace + (4096 - 2)))
+                  else do
+                    -- We take pains to ensure that there are always two
+                    -- unused bytes at the end of the array. This gives
+                    -- us the space we need for the CRLF.
+                    PM.writeByteArray barrNext ixNext (c2w '\r')
+                    PM.writeByteArray barrNext (ixNext + 1) (c2w '\n')
+                    -- Now, we go back to the beginning of byte array and write
+                    -- the hex-encoded length. We do not know the length in advance,
+                    -- so we write it out after running the builder.
+                    off <- BBU.pasteIO
+                      (BBU.word64PaddedUpperHex (fromIntegral (ixNext - off0 - (16 + 2))))
+                      barrNext
+                      off0
+                    PM.writeByteArray barrNext off (c2w '\r')
+                    PM.writeByteArray barrNext (off + 1) (c2w '\n')
+                    SMB.send conn (MutableBytes barrNext 0 (ixNext + 2)) >>= \case
+                      Left err -> pure (barrNext,Left (SendException err))
+                      Right (_ :: ()) -> go 0 pointsNext
+                        (MutableBytes barrNext (16 + 2) (bufSpace - (2 + 16 + 2)))
+        !len1 <- fmap (\x -> x - i1) (PM.getSizeofMutableByteArray buf1)
+        -- Discard the possibly enlarged buffer.
+        -- TODO: Store this buffer for reuse.
+        go i0 points0 (MutableBytes buf1 i1 (len1 - 2)) >>= \case
+          (bufNew, Right (_ :: ())) -> do
+            -- It would be really nice if we could avoid making
+            -- a syscall just to push out these five additional bytes.
+            -- However, there is not a terribly elegant way to do this.
+            -- For now, we opt for simplicity.
+            PM.writeByteArray bufNew 0 (c2w '0')
+            PM.writeByteArray bufNew 1 (c2w '\r')
+            PM.writeByteArray bufNew 2 (c2w '\n')
+            PM.writeByteArray bufNew 3 (c2w '\r')
+            PM.writeByteArray bufNew 4 (c2w '\n')
+            SMB.send conn (MutableBytes bufNew 0 5) >>= \case
+              Left err -> do
+                PM.writeUnliftedArray bufRef 0 bufNew
+                writeLocalPort inf 0
+                SCK.disconnect_ conn
+                pure $! Left $! SendException err
+              Right (_ :: ()) -> do
+                (bufNew',e) <- receiveResponseStage1 conn bufNew
+                PM.writeUnliftedArray bufRef 0 bufNew'
+                case e of
+                  Left err -> pure (Left err)
+                  Right (_ :: ()) -> pure (Right ())
+          (bufNew, Left err) -> do
             PM.writeUnliftedArray bufRef 0 bufNew
             writeLocalPort inf 0
             SCK.disconnect_ conn
-            pure $! Left $! SendException err
-          Right (_ :: ()) -> do
-            (bufNew',e) <- receiveResponseStage1 conn bufNew
-            PM.writeUnliftedArray bufRef 0 bufNew'
-            case e of
-              Left err -> pure (Left err)
-              Right (_ :: ()) -> pure (Right ())
-      (bufNew, Left err) -> do
-        PM.writeUnliftedArray bufRef 0 bufNew
-        writeLocalPort inf 0
-        SCK.disconnect_ conn
-        pure (Left err)
+            pure (Left err)
 
 -- | Ensure that a connection to InfluxDB is open. If a connection
 -- is already active, this has no effect. Otherwise, it attempts to
