@@ -6,6 +6,16 @@
 {-# language MagicHash #-}
 {-# language ScopedTypeVariables #-}
 
+{-| This module provides an API for writing InfluxDB line protocol
+    'Point's to InfluxDB. To create 'Point's, see
+    "Database.Influx.LineProtocol".
+
+    There are two ways to use this API: bracketed (using 'with') and
+    unbracketed (using 'open' and 'close'). It is strongly recommended
+    to use the bracketed 'with' unless you are writing some API on
+    top of these functions.
+ -}
+
 module Database.Influx.Write
   ( -- * Channel
     Influx
@@ -83,14 +93,15 @@ data InfluxException
   | WriteSizeZeroException -- ^ We tried to write a vector of size 0.
   deriving (Eq, Show)
 
+-- | A connection to our 'Influx' instance.
 data Influx = Influx
   !(MutableByteArray RealWorld)
   -- Inside this mutable byte array, we have:
-  -- * Reconnection count: Word64
-  -- * Active connection: SCK.Connection (CInt), given 64 bits of space
-  -- * Peer IPv4 (static): Word32
-  -- * Peer Port (static): Word16
-  -- * Local Port: Word16
+  -- 1. Reconnection count: Word64
+  -- 2. Active connection: SCK.Connection (CInt), given 64 bits of space
+  -- 3. Peer IPv4 (static): Word32
+  -- 4. Peer Port (static): Word16
+  -- 5. Local Port: Word16
   !ByteArray -- Hostname of the peer
   !(MutableUnliftedArray RealWorld (MutableByteArray RealWorld))
 
@@ -235,6 +246,7 @@ readActiveConnection (Influx arr _ _) = do
       c <- PM.readUnalignedByteArray arr 8
       pure (Just (SCK.Connection c))
 
+-- | Open a connection to an 'Influx' instance.
 open :: Peer -> IO Influx
 open Peer{address,port} = do
   arr <- PM.newByteArray metadataSize
@@ -248,6 +260,7 @@ open Peer{address,port} = do
   PM.writeUnliftedArray bufRef 0 =<< PM.newByteArray minimumBufferSize
   pure (Influx arr peerDescr bufRef)
 
+-- | Close a connection to an 'Influx' instance.
 close :: Influx -> IO (Either SCK.CloseException ())
 close = disconnected
 
@@ -403,7 +416,19 @@ disconnected inf = readActiveConnection inf >>= \case
     writeLocalPort inf 0
     SCK.disconnect conn
 
-with :: Peer -> (Influx -> IO a) -> IO (Either SCK.CloseException (), a)
+-- | Perform some 'IO' operation by connecting to an 'Influx' instance.
+--   This will catch any exceptions and ensure that the connection to
+--   'Influx' is closed. Returns both the value returned by your action
+--   and an 'SCK.CloseException', if one occured.
+--
+--   /Note/: It is strongly preferred that you use 'with' over calling
+--   'open' or 'close' directly, unless you are writing some API over those
+--   two functions.
+with :: ()
+  => Peer -- ^ The Peer where the 'Influx' instance is located.
+  -> (Influx -> IO a) -- ^ Apply this function to the connection to
+                      --   our 'Influx' instance
+  -> IO (Either SCK.CloseException (), a)
 with p f = do
   inf <- open p
   mask $ \restore -> do
