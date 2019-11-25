@@ -13,14 +13,14 @@ import qualified Data.Vector as V
 import qualified GHC.Exts as Exts
 import qualified Net.IPv4 as IPv4
 
-import qualified "primitive-checked" Data.Primitive as PM
+import qualified "primitive" Data.Primitive as PM
 
 main :: IO ()
 main = do
   putStrLn "Starting"
   (e,()) <- with (Peer{address=IPv4.fromOctets 10 149 217 223,port=8086}) $ \inf -> do
     write inf (Database (str "my_database")) points >>= \case
-      Left _ -> fail "write failed"
+      Left err -> fail ("write failed: " ++ show err)
       Right () -> pure ()
   case e of
     Left _ -> fail "close failed"

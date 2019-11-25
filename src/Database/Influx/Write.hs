@@ -5,6 +5,7 @@
 {-# language LambdaCase #-}
 {-# language MagicHash #-}
 {-# language ScopedTypeVariables #-}
+{-# language TypeApplications #-}
 
 {-| This module provides an API for writing InfluxDB line protocol
     'Point's to InfluxDB. To create 'Point's, see
@@ -34,7 +35,8 @@ module Database.Influx.Write
   ) where
 
 import Control.Exception (mask,onException)
-import Control.Monad.ST (ST)
+import Control.Monad.ST (ST,runST)
+import Control.Monad.Trans.Except (ExceptT(ExceptT),runExceptT)
 import Data.Bytes.Types (MutableBytes(..))
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
@@ -53,9 +55,12 @@ import Net.Types (IPv4(..))
 import Socket.Stream.IPv4 (Connection,Peer(..))
 import Socket.Stream.IPv4 (Family(Internet),Version(V4))
 import Socket.Stream.IPv4 (Interruptibility(Uninterruptible),CloseException)
-import qualified Data.ByteArray.Builder.Small as BB
-import qualified Data.ByteArray.Builder.Small.Unsafe as BBU
+import qualified Arithmetic.Nat as Nat
+import qualified Data.ByteArray.Builder as BB
+import qualified Data.ByteArray.Builder.Unsafe as BBU
+import qualified Data.ByteArray.Builder.Bounded as Bounded
 import qualified Data.ByteString.Unsafe as BU
+import qualified Data.Bytes as Bytes
 import qualified Data.Primitive as PM
 import qualified Data.Primitive.Addr as PM
 import qualified Data.Primitive.ByteArray.Unaligned as PM
@@ -65,6 +70,7 @@ import qualified Data.Vector as V
 import qualified GHC.Exts as Exts
 import qualified Net.IPv4 as IPv4
 import qualified Socket.Stream.IPv4 as SCK
+import qualified Socket.Stream.Uninterruptible.Bytes as SB
 import qualified Socket.Stream.Uninterruptible.MutableBytes as SMB
 import qualified System.IO as IO
 
@@ -90,7 +96,6 @@ data InfluxException
   | SendException (SCK.SendException 'Uninterruptible) -- ^ There was an exception when trying to send something to an 'Influx' 'Database'.
   | ReceiveException (SCK.ReceiveException 'Uninterruptible) -- ^ There was an exception encountered when trying to receive a response from an 'Influx' 'Database'.
   | ResponseException -- ^ We received a non-204 HTTP response code.
-  | WriteSizeZeroException -- ^ We tried to write a vector of size 0.
   deriving (Eq, Show)
 
 -- | A connection to our 'Influx' instance.
@@ -102,8 +107,8 @@ data Influx = Influx
   -- 3. Peer IPv4 (static): Word32
   -- 4. Peer Port (static): Word16
   -- 5. Local Port: Word16
-  !ByteArray -- Hostname of the peer
-  !(MutableUnliftedArray RealWorld (MutableByteArray RealWorld))
+  !ByteArray
+  -- Hostname of the peer
 
 -- | An InfluxDB database name represented as UTF-8 encoded text.
 -- InfluxDB does not document any restrictions on the name of a database.
@@ -125,57 +130,54 @@ w2c = chr . fromIntegral
 encodeHttpHeaders ::
      ByteArray -- Encoded host
   -> ByteArray -- Database
-  -> BB.Builder
-encodeHttpHeaders host db = BB.construct $ \(MutableBytes arr off len) -> do
+  -> ByteArray
+encodeHttpHeaders host db = runST $ do
   let requiredBytes = 0
         + PM.sizeofByteArray host
         + PM.sizeofByteArray db
         + ( staticRequestHeadersLen
           + ( 28 -- http method and most of url
-            + 4 -- trailing CRLFx2
+            + 2 -- trailing CRLFx1
             )
           )
-  if requiredBytes <= len
-    then do
-      PM.writeByteArray arr (off + 0) (c2w 'P')
-      PM.writeByteArray arr (off + 1) (c2w 'O')
-      PM.writeByteArray arr (off + 2) (c2w 'S')
-      PM.writeByteArray arr (off + 3) (c2w 'T')
-      PM.writeByteArray arr (off + 4) (c2w ' ')
-      PM.writeByteArray arr (off + 5) (c2w '/')
-      PM.writeByteArray arr (off + 6) (c2w 'w')
-      PM.writeByteArray arr (off + 7) (c2w 'r')
-      PM.writeByteArray arr (off + 8) (c2w 'i')
-      PM.writeByteArray arr (off + 9) (c2w 't')
-      PM.writeByteArray arr (off + 10) (c2w 'e')
-      PM.writeByteArray arr (off + 11) (c2w '?')
-      PM.writeByteArray arr (off + 12) (c2w 'p')
-      PM.writeByteArray arr (off + 13) (c2w 'r')
-      PM.writeByteArray arr (off + 14) (c2w 'e')
-      PM.writeByteArray arr (off + 15) (c2w 'c')
-      PM.writeByteArray arr (off + 16) (c2w 'i')
-      PM.writeByteArray arr (off + 17) (c2w 's')
-      PM.writeByteArray arr (off + 18) (c2w 'i')
-      PM.writeByteArray arr (off + 19) (c2w 'o')
-      PM.writeByteArray arr (off + 20) (c2w 'n')
-      PM.writeByteArray arr (off + 21) (c2w '=')
-      PM.writeByteArray arr (off + 22) (c2w 'n')
-      PM.writeByteArray arr (off + 23) (c2w 's')
-      PM.writeByteArray arr (off + 24) (c2w '&')
-      PM.writeByteArray arr (off + 25) (c2w 'd')
-      PM.writeByteArray arr (off + 26) (c2w 'b')
-      PM.writeByteArray arr (off + 27) (c2w '=')
-      i0 <- copySmall arr (off + 28) db
-      PM.copyAddrToByteArray arr i0 staticRequestHeaders staticRequestHeadersLen
-      let i1 = i0 + staticRequestHeadersLen
-      i2 <- copySmall arr i1 host
-      PM.writeByteArray arr i2 (c2w '\r')
-      PM.writeByteArray arr (i2 + 1) (c2w '\n')
-      PM.writeByteArray arr (i2 + 2) (c2w '\r')
-      PM.writeByteArray arr (i2 + 3) (c2w '\n')
-      let i3 = i2 + 4
-      pure (Just i3)
-    else pure Nothing
+  arr <- PM.newByteArray requiredBytes
+  PM.writeByteArray arr 0 (c2w 'P')
+  PM.writeByteArray arr 1 (c2w 'O')
+  PM.writeByteArray arr 2 (c2w 'S')
+  PM.writeByteArray arr 3 (c2w 'T')
+  PM.writeByteArray arr 4 (c2w ' ')
+  PM.writeByteArray arr 5 (c2w '/')
+  PM.writeByteArray arr 6 (c2w 'w')
+  PM.writeByteArray arr 7 (c2w 'r')
+  PM.writeByteArray arr 8 (c2w 'i')
+  PM.writeByteArray arr 9 (c2w 't')
+  PM.writeByteArray arr 10 (c2w 'e')
+  PM.writeByteArray arr 11 (c2w '?')
+  PM.writeByteArray arr 12 (c2w 'p')
+  PM.writeByteArray arr 13 (c2w 'r')
+  PM.writeByteArray arr 14 (c2w 'e')
+  PM.writeByteArray arr 15 (c2w 'c')
+  PM.writeByteArray arr 16 (c2w 'i')
+  PM.writeByteArray arr 17 (c2w 's')
+  PM.writeByteArray arr 18 (c2w 'i')
+  PM.writeByteArray arr 19 (c2w 'o')
+  PM.writeByteArray arr 20 (c2w 'n')
+  PM.writeByteArray arr 21 (c2w '=')
+  PM.writeByteArray arr 22 (c2w 'n')
+  PM.writeByteArray arr 23 (c2w 's')
+  PM.writeByteArray arr 24 (c2w '&')
+  PM.writeByteArray arr 25 (c2w 'd')
+  PM.writeByteArray arr 26 (c2w 'b')
+  PM.writeByteArray arr 27 (c2w '=')
+  i0 <- copySmall arr 28 db
+  PM.copyAddrToByteArray arr i0 staticRequestHeaders staticRequestHeadersLen
+  let i1 = i0 + staticRequestHeadersLen
+  i2 <- copySmall arr i1 host
+  PM.writeByteArray arr i2 (c2w '\r')
+  PM.writeByteArray arr (i2 + 1) (c2w '\n')
+  -- PM.writeByteArray arr (i2 + 2) (c2w '\r')
+  -- PM.writeByteArray arr (i2 + 3) (c2w '\n')
+  PM.unsafeFreezeByteArray arr
 
 -- Used internally. When debugging problems, it can be helpful
 -- to set this to a lower number.
@@ -217,28 +219,28 @@ metadataSize :: Int
 metadataSize = 24
 
 incrementConnectionCount :: Influx -> IO ()
-incrementConnectionCount (Influx arr _ _) = do
+incrementConnectionCount (Influx arr _) = do
   n :: Word64 <- PM.readUnalignedByteArray arr 0
   PM.writeUnalignedByteArray arr 0 (n + 1)
 
 writeActiveConnection :: Influx -> Connection -> IO ()
-writeActiveConnection (Influx arr _ _) (SCK.Connection c) =
+writeActiveConnection (Influx arr _) (SCK.Connection c) =
   PM.writeUnalignedByteArray arr 8 c
 
 writeLocalPort :: Influx -> Word16 -> IO ()
-writeLocalPort (Influx arr _ _) =
+writeLocalPort (Influx arr _) =
   PM.writeUnalignedByteArray arr 22
 
 readPeerIPv4 :: Influx -> IO IPv4
-readPeerIPv4 (Influx arr _ _) = do
+readPeerIPv4 (Influx arr _) = do
   w <- PM.readUnalignedByteArray arr 16
   pure (IPv4 w)
 
 readPeerPort :: Influx -> IO Word16
-readPeerPort (Influx arr _ _) = PM.readUnalignedByteArray arr 20
+readPeerPort (Influx arr _) = PM.readUnalignedByteArray arr 20
 
 readActiveConnection :: Influx -> IO (Maybe Connection)
-readActiveConnection (Influx arr _ _) = do
+readActiveConnection (Influx arr _) = do
   w :: Word16 <- PM.readUnalignedByteArray arr 22
   case w of
     0 -> pure Nothing
@@ -256,9 +258,7 @@ open Peer{address,port} = do
   PM.writeUnalignedByteArray arr 20 port
   PM.writeUnalignedByteArray arr 22 (0 :: Word16)
   peerDescr <- fromByteString (IPv4.encodeUtf8 address)
-  bufRef <- PM.unsafeNewUnliftedArray 1
-  PM.writeUnliftedArray bufRef 0 =<< PM.newByteArray minimumBufferSize
-  pure (Influx arr peerDescr bufRef)
+  pure (Influx arr peerDescr)
 
 -- | Close a connection to an 'Influx' instance.
 close :: Influx -> IO (Either SCK.CloseException ())
@@ -272,91 +272,49 @@ write ::
   -> Database -- ^ Database name
   -> Vector Point -- ^ Data points
   -> IO (Either InfluxException ())
-write !inf@(Influx _ peerDescr bufRef) (Database db) = \ !points0 ->
-  if V.length points0 == 0
-    then pure $! Left $! WriteSizeZeroException
-    else getConnection inf >>= \case
-      Left err -> pure $! Left $! ConnectException err
-      Right conn -> do
-        -- TODO: escape the database name correctly
-        let host = peerDescr
-            bufSz0 = minimumBufferSize
-        buf0 <- PM.readUnliftedArray bufRef 0
-        MutableByteArrayOffset{array=buf1,offset=i0} <- BB.pasteGrowIO
-          4096 (encodeHttpHeaders host db)
-          (MutableByteArrayOffset{array=buf0,offset=0})
-        -- We reserve 18 bytes for the hexadecimal encoding of a
-        -- length that is at most 32 bits and the CRLF after it.
-        let i1 = i0 + (16 + 2)
-        let go :: Int -- starting offset, zero after first run
-               -> Vector Point
-               -> MutableBytes RealWorld
-               -> IO (MutableByteArray RealWorld, Either InfluxException ())
-            go !off0 !points !buf@MutableBytes{array=bufArr} = if V.null points
-              then pure (bufArr, Right ())
-              else do
-                -- This slice into the buffer represents the unused bytes,
-                -- not the ones that were successfully written to. This
-                -- is a little backwards from what one might imagine. By
-                -- taking the offset to be 0 and the length to be the returned
-                -- offset, we can get the slice that has been written to.
-                (!pointsNext,MutableBytes barrNext ixNext _) <-
-                  BB.pasteArrayIO buf encodePoint points
-                bufSpace <- PM.getSizeofMutableByteArray barrNext
-                if V.length pointsNext == V.length points
-                  then do
-                    barrNext' <- PM.resizeMutableByteArray barrNext (bufSpace + 4096)
-                    go off0 pointsNext (MutableBytes barrNext' 0 (bufSpace + (4096 - 2)))
-                  else do
-                    -- We take pains to ensure that there are always two
-                    -- unused bytes at the end of the array. This gives
-                    -- us the space we need for the CRLF.
-                    PM.writeByteArray barrNext ixNext (c2w '\r')
-                    PM.writeByteArray barrNext (ixNext + 1) (c2w '\n')
-                    -- Now, we go back to the beginning of byte array and write
-                    -- the hex-encoded length. We do not know the length in advance,
-                    -- so we write it out after running the builder.
-                    off <- BBU.pasteIO
-                      (BBU.word64PaddedUpperHex (fromIntegral (ixNext - off0 - (16 + 2))))
-                      barrNext
-                      off0
-                    PM.writeByteArray barrNext off (c2w '\r')
-                    PM.writeByteArray barrNext (off + 1) (c2w '\n')
-                    SMB.send conn (MutableBytes barrNext 0 (ixNext + 2)) >>= \case
-                      Left err -> pure (barrNext,Left (SendException err))
-                      Right (_ :: ()) -> go 0 pointsNext
-                        (MutableBytes barrNext (16 + 2) (bufSpace - (2 + 16 + 2)))
-        !len1 <- fmap (\x -> x - i1) (PM.getSizeofMutableByteArray buf1)
-        -- Discard the possibly enlarged buffer.
-        -- TODO: Store this buffer for reuse.
-        go i0 points0 (MutableBytes buf1 i1 (len1 - 2)) >>= \case
-          (bufNew, Right (_ :: ())) -> do
-            -- It would be really nice if we could avoid making
-            -- a syscall just to push out these five additional bytes.
-            -- However, there is not a terribly elegant way to do this.
-            -- For now, we opt for simplicity.
-            PM.writeByteArray bufNew 0 (c2w '0')
-            PM.writeByteArray bufNew 1 (c2w '\r')
-            PM.writeByteArray bufNew 2 (c2w '\n')
-            PM.writeByteArray bufNew 3 (c2w '\r')
-            PM.writeByteArray bufNew 4 (c2w '\n')
-            SMB.send conn (MutableBytes bufNew 0 5) >>= \case
-              Left err -> do
-                PM.writeUnliftedArray bufRef 0 bufNew
-                writeLocalPort inf 0
-                SCK.disconnect_ conn
-                pure $! Left $! SendException err
-              Right (_ :: ()) -> do
-                (bufNew',e) <- receiveResponseStage1 conn bufNew
-                PM.writeUnliftedArray bufRef 0 bufNew'
-                case e of
-                  Left err -> pure (Left err)
-                  Right (_ :: ()) -> pure (Right ())
-          (bufNew, Left err) -> do
-            PM.writeUnliftedArray bufRef 0 bufNew
-            writeLocalPort inf 0
-            SCK.disconnect_ conn
-            pure (Left err)
+write !inf@(Influx _ peerDescr) (Database db) !points0 = case V.length points0 of
+  0 -> pure (Right ())
+  _ -> getConnection inf >>= \case
+    Left err -> pure $! Left $! ConnectException err
+    Right conn -> do
+      -- TODO: escape the database name correctly
+      let host = peerDescr
+          bufSz0 = minimumBufferSize
+          headers = encodeHttpHeaders host db
+      r <- runExceptT $ do
+        ExceptT (SB.send conn (Bytes.fromByteArray headers))
+        -- The headers have been sent. We must now send all the points.
+        BB.putManyConsLength
+          (Nat.constant @20)
+          (\sz -> Bounded.ascii '\r'
+            `Bounded.append` Bounded.ascii '\n'
+            `Bounded.append` Bounded.word64PaddedUpperHex (fromIntegral sz)
+            `Bounded.append` Bounded.ascii '\r'
+            `Bounded.append` Bounded.ascii '\n'
+          )
+          8176
+          encodePoint
+          points0
+          (ExceptT . SMB.send conn)
+        ExceptT (SB.send conn (Bytes.fromByteArray terminator))
+      case r of
+        Left err -> do
+          writeLocalPort inf 0
+          SCK.disconnect_ conn
+          pure (Left (SendException err))
+        Right (_ :: ()) -> receiveResponseStage1 conn
+
+terminator :: ByteArray
+terminator = runST $ do
+  arr <- PM.newByteArray 7
+  PM.writeByteArray arr 0 (c2w '\r')
+  PM.writeByteArray arr 1 (c2w '\n')
+  PM.writeByteArray arr 2 (c2w '0')
+  PM.writeByteArray arr 3 (c2w '\r')
+  PM.writeByteArray arr 4 (c2w '\n')
+  PM.writeByteArray arr 5 (c2w '\r')
+  PM.writeByteArray arr 6 (c2w '\n')
+  PM.unsafeFreezeByteArray arr
 
 -- | Ensure that a connection to InfluxDB is open. If a connection
 -- is already active, this has no effect. Otherwise, it attempts to
@@ -436,14 +394,12 @@ with p f = do
     e <- disconnected inf
     pure (e,a)
 
-receiveResponseStage1 ::
-     Connection
-  -> MutableByteArray RealWorld
-  -> IO (MutableByteArray RealWorld, Either InfluxException ())
-receiveResponseStage1 conn arr = do
-  sz <- PM.getSizeofMutableByteArray arr
+receiveResponseStage1 :: Connection -> IO (Either InfluxException ())
+receiveResponseStage1 conn = do
+  let sz = 1008
+  arr <- PM.newByteArray sz
   SMB.receiveBetween conn (MutableBytes arr 0 sz) 12 >>= \case
-    Left err -> pure $! (arr, Left $! ReceiveException $! err)
+    Left err -> pure $! Left $! ReceiveException $! err
     Right n -> do
       c0 <- PM.readByteArray arr 0
       c1 <- PM.readByteArray arr 1
@@ -474,7 +430,7 @@ receiveResponseStage1 conn arr = do
         then receiveResponseStage2 conn arr n sz
         else do
           putStrLn $ map w2c [c0,c1,c2,c3,c4,c5,c6,c7,c8,c9,c10,c11]
-          pure $! (arr, Left ResponseException)
+          pure $! Left ResponseException
 
 -- Precondition: ix >= 4
 receiveResponseStage2 ::
@@ -482,7 +438,7 @@ receiveResponseStage2 ::
   -> MutableByteArray RealWorld
   -> Int -- Index
   -> Int -- Total size
-  -> IO (MutableByteArray RealWorld, Either InfluxException ())
+  -> IO (Either InfluxException ())
 receiveResponseStage2 !sock !buffer !ix !sz = if ix < sz
   then do
     (w4 :: Word8) <- PM.readByteArray buffer (ix - 1)
@@ -490,11 +446,11 @@ receiveResponseStage2 !sock !buffer !ix !sz = if ix < sz
     (w2 :: Word8) <- PM.readByteArray buffer (ix - 3)
     (w1 :: Word8) <- PM.readByteArray buffer (ix - 4)
     if w1 == 13 && w2 == 10 && w3 == 13 && w4 == 10
-      then pure $! (buffer, Right ())
+      then pure $! Right ()
       else do
         let remaining = sz - ix
         SMB.receiveOnce sock (MutableBytes buffer 0 remaining) >>= \case
-          Left err -> pure $! (buffer, Left $! ReceiveException $! err)
+          Left err -> pure $! Left $! ReceiveException $! err
           Right n -> receiveResponseStage2 sock buffer (ix + n) sz
   else do
     buffer' <- PM.resizeMutableByteArray buffer (sz * 2)
