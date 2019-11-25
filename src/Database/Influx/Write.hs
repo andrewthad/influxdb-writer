@@ -256,7 +256,10 @@ open Peer{address,port} = do
   PM.writeUnalignedByteArray arr 8 ((-1) :: CInt)
   PM.writeUnalignedByteArray arr 16 (getIPv4 address)
   PM.writeUnalignedByteArray arr 20 port
-  PM.writeUnalignedByteArray arr 22 (0 :: Word16)
+  -- TODO: Write the real port out. It is only used for diagnostic reasons.
+  -- It just needs to be something other than zero. Other functions interpret
+  -- the zero port to mean that there is no active connection.
+  PM.writeUnalignedByteArray arr 22 (1 :: Word16)
   peerDescr <- fromByteString (IPv4.encodeUtf8 address)
   pure (Influx arr peerDescr)
 
