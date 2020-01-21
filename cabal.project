@@ -2,13 +2,9 @@ packages: .
 
 source-repository-package
   type: git
-  location: https://github.com/andrewthad/small-bytearray-builder
-  tag: e8de684ae2b0901cc745b9e1b0c4477bde4b760d
-source-repository-package
-  type: git
   location: https://github.com/andrewthad/influxdb-line-protocol
-  tag: 7e23f7a1e116b83f70f1b96cd099276e61479dee
+  tag: 1edcf97ba98ea4a50cbe9f3ed52b0cd3f4ca42c7
 source-repository-package
   type: git
   location: https://github.com/andrewthad/sockets
-  tag: 68dc890f21709eb760e761185ebf17b6fa849b8e
+  tag: 644b8b52aed4237eac2dd42eaf889753d4392ac4
