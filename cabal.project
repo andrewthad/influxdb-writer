@@ -3,8 +3,12 @@ packages: .
 source-repository-package
   type: git
   location: https://github.com/andrewthad/influxdb-line-protocol
-  tag: 1edcf97ba98ea4a50cbe9f3ed52b0cd3f4ca42c7
+  tag: a13d196ea6953c0d1f95f5419bc98eaa3cd6bfdc
 source-repository-package
   type: git
   location: https://github.com/andrewthad/sockets
   tag: 644b8b52aed4237eac2dd42eaf889753d4392ac4
+source-repository-package
+  type: git
+  location: https://github.com/byteverse/byteslice
+  tag: bc86f291283eaaa30f3d8095b7c8693ceb07c282

@@ -21,7 +21,9 @@ library
   exposed-modules: Database.Influx.Write
   build-depends:
     , base >=4.12.0.0 && <5
-    , byteslice >=0.2 && <0.3
+    , base64-bytes >=0.1 && <0.2
+    , bytebuild >=0.3.6 && <0.4
+    , byteslice >=0.2.4 && <0.3
     , bytestring >= 0.10 && < 0.11
     , influxdb-line-protocol >=0.1 && <0.2
     , ip >=1.5 && <1.6
@@ -31,7 +33,6 @@ library
     , primitive-offset >=0.2 && <0.3
     , primitive-unaligned >=0.1.1 && <0.2
     , primitive-unlifted >=0.1.1 && <0.2
-    , small-bytearray-builder >=0.3.2 && <0.4
     , sockets >=0.6 && <0.7
     , transformers >=0.5 && <0.7
     , vector >=0.12.0.3 && <0.13

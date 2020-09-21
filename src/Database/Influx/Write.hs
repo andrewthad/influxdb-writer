@@ -21,11 +21,13 @@ module Database.Influx.Write
   ( -- * Channel
     Influx
   , with
+  , withBasicAuth
     -- * Time-Series Metrics
   , Database(..)
   , write
     -- * Unbracketed Channel
   , open
+  , openBasicAuth
   , close
     -- * Explicit Connection
   , connected
@@ -37,7 +39,7 @@ module Database.Influx.Write
 import Control.Exception (mask,onException)
 import Control.Monad.ST (ST,runST)
 import Control.Monad.Trans.Except (ExceptT(ExceptT),runExceptT)
-import Data.Bytes.Types (MutableBytes(..))
+import Data.Bytes.Types (MutableBytes(..),Bytes)
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
 import Data.Primitive (ByteArray,MutableByteArray)
@@ -56,11 +58,14 @@ import Socket.Stream.IPv4 (Connection,Peer(..))
 import Socket.Stream.IPv4 (Family(Internet),Version(V4))
 import Socket.Stream.IPv4 (Interruptibility(Uninterruptible),CloseException)
 import qualified Arithmetic.Nat as Nat
-import qualified Data.ByteArray.Builder as BB
-import qualified Data.ByteArray.Builder.Unsafe as BBU
-import qualified Data.ByteArray.Builder.Bounded as Bounded
 import qualified Data.ByteString.Unsafe as BU
 import qualified Data.Bytes as Bytes
+import qualified Data.Bytes.Base64 as Base64
+import qualified Data.Bytes.Builder as BB
+import qualified Data.Bytes.Builder as Builder
+import qualified Data.Bytes.Builder.Bounded as Bounded
+import qualified Data.Bytes.Builder.Unsafe as BBU
+import qualified Data.Bytes.Chunks as Chunks
 import qualified Data.Primitive as PM
 import qualified Data.Primitive.Addr as PM
 import qualified Data.Primitive.ByteArray.Unaligned as PM
@@ -109,6 +114,9 @@ data Influx = Influx
   -- 5. Local Port: Word16
   !ByteArray
   -- Hostname of the peer
+  !ByteArray
+  -- A header with the authentication credentials. This is either empty
+  -- (no authentication) or trailed by CR-LF.
 
 -- | An InfluxDB database name represented as UTF-8 encoded text.
 -- InfluxDB does not document any restrictions on the name of a database.
@@ -130,11 +138,13 @@ w2c = chr . fromIntegral
 encodeHttpHeaders ::
      ByteArray -- Encoded host
   -> ByteArray -- Database
+  -> ByteArray -- Auth header
   -> ByteArray
-encodeHttpHeaders host db = runST $ do
+encodeHttpHeaders !host !db !authHdr = runST $ do
   let requiredBytes = 0
         + PM.sizeofByteArray host
         + PM.sizeofByteArray db
+        + PM.sizeofByteArray authHdr
         + ( staticRequestHeadersLen
           + ( 28 -- http method and most of url
             + 2 -- trailing CRLFx1
@@ -175,8 +185,7 @@ encodeHttpHeaders host db = runST $ do
   i2 <- copySmall arr i1 host
   PM.writeByteArray arr i2 (c2w '\r')
   PM.writeByteArray arr (i2 + 1) (c2w '\n')
-  -- PM.writeByteArray arr (i2 + 2) (c2w '\r')
-  -- PM.writeByteArray arr (i2 + 3) (c2w '\n')
+  PM.copyByteArray arr (i2 + 2) authHdr 0 (PM.sizeofByteArray authHdr)
   PM.unsafeFreezeByteArray arr
 
 -- Used internally. When debugging problems, it can be helpful
@@ -219,28 +228,28 @@ metadataSize :: Int
 metadataSize = 24
 
 incrementConnectionCount :: Influx -> IO ()
-incrementConnectionCount (Influx arr _) = do
+incrementConnectionCount (Influx arr _ _) = do
   n :: Word64 <- PM.readUnalignedByteArray arr 0
   PM.writeUnalignedByteArray arr 0 (n + 1)
 
 writeActiveConnection :: Influx -> Connection -> IO ()
-writeActiveConnection (Influx arr _) (SCK.Connection c) =
+writeActiveConnection (Influx arr _ _) (SCK.Connection c) =
   PM.writeUnalignedByteArray arr 8 c
 
 writeLocalPort :: Influx -> Word16 -> IO ()
-writeLocalPort (Influx arr _) =
+writeLocalPort (Influx arr _ _) =
   PM.writeUnalignedByteArray arr 22
 
 readPeerIPv4 :: Influx -> IO IPv4
-readPeerIPv4 (Influx arr _) = do
+readPeerIPv4 (Influx arr _ _) = do
   w <- PM.readUnalignedByteArray arr 16
   pure (IPv4 w)
 
 readPeerPort :: Influx -> IO Word16
-readPeerPort (Influx arr _) = PM.readUnalignedByteArray arr 20
+readPeerPort (Influx arr _ _) = PM.readUnalignedByteArray arr 20
 
 readActiveConnection :: Influx -> IO (Maybe Connection)
-readActiveConnection (Influx arr _) = do
+readActiveConnection (Influx arr _ _) = do
   w :: Word16 <- PM.readUnalignedByteArray arr 22
   case w of
     0 -> pure Nothing
@@ -260,7 +269,31 @@ open Peer{address,port} = do
   -- zero port to mean that there is no active connection.
   PM.writeUnalignedByteArray arr 22 (0 :: Word16)
   peerDescr <- fromByteString (IPv4.encodeUtf8 address)
-  pure (Influx arr peerDescr)
+  pure (Influx arr peerDescr mempty)
+
+-- | Open a connection to an 'Influx' instance using BasicAuth.
+openBasicAuth ::
+     Peer
+  -> Bytes -- ^ Username
+  -> Bytes -- ^ Password
+  -> IO Influx
+openBasicAuth Peer{address,port} !user !pass = do
+  arr <- PM.newByteArray metadataSize
+  PM.writeUnalignedByteArray arr 0 (0 :: Word64)
+  PM.writeUnalignedByteArray arr 8 ((-1) :: CInt)
+  PM.writeUnalignedByteArray arr 16 (getIPv4 address)
+  PM.writeUnalignedByteArray arr 20 port
+  -- The port needs to be zero. Other functions interpret the
+  -- zero port to mean that there is no active connection.
+  PM.writeUnalignedByteArray arr 22 (0 :: Word16)
+  peerDescr <- fromByteString (IPv4.encodeUtf8 address)
+  pure (Influx arr peerDescr (buildBasicAuthHeader user pass))
+
+buildBasicAuthHeader :: Bytes -> Bytes -> ByteArray
+buildBasicAuthHeader !user !pass = Chunks.concatU $ Builder.run 256 $
+  Builder.cstring (Ptr "Authorization: Basic "# ) <>
+  Base64.builder (Bytes.intercalateByte2 0x2E user pass) <>
+  Builder.fromBounded Nat.two (Bounded.append (Bounded.ascii '\r') (Bounded.ascii '\n'))
 
 -- | Close a connection to an 'Influx' instance.
 close :: Influx -> IO (Either SCK.CloseException ())
@@ -274,7 +307,7 @@ write ::
   -> Database -- ^ Database name
   -> Vector Point -- ^ Data points
   -> IO (Either InfluxException ())
-write !inf@(Influx _ peerDescr) (Database db) !points0 = case V.length points0 of
+write !inf@(Influx _ peerDescr authHdr) (Database db) !points0 = case V.length points0 of
   0 -> pure (Right ())
   _ -> getConnection inf >>= \case
     Left err -> pure $! Left $! ConnectException err
@@ -282,7 +315,7 @@ write !inf@(Influx _ peerDescr) (Database db) !points0 = case V.length points0 o
       -- TODO: escape the database name correctly
       let host = peerDescr
           bufSz0 = minimumBufferSize
-          headers = encodeHttpHeaders host db
+          headers = encodeHttpHeaders host db authHdr
       r <- runExceptT $ do
         ExceptT (SB.send conn (Bytes.fromByteArray headers))
         -- The headers have been sent. We must now send all the points.
@@ -387,13 +420,28 @@ disconnected inf = readActiveConnection inf >>= \case
 --   /Note/: It is strongly preferred that you use 'with' over calling
 --   'open' or 'close' directly, unless you are writing some API over those
 --   two functions.
-with :: ()
-  => Peer -- ^ The Peer where the 'Influx' instance is located.
+with ::
+     Peer -- ^ The Peer where the 'Influx' instance is located.
   -> (Influx -> IO a) -- ^ Apply this function to the connection to
                       --   our 'Influx' instance
   -> IO (Either SCK.CloseException (), a)
 with p f = do
   inf <- open p
+  mask $ \restore -> do
+    a <- onException (restore (f inf)) (disconnected inf)
+    e <- disconnected inf
+    pure (e,a)
+
+-- | Variant of 'with' that uses BasicAuth to authenticate.
+withBasicAuth ::
+     Peer -- ^ The Peer where the 'Influx' instance is located.
+  -> Bytes -- ^ User
+  -> Bytes -- ^ Password
+  -> (Influx -> IO a) -- ^ Apply this function to the connection to
+                      --   our 'Influx' instance
+  -> IO (Either SCK.CloseException (), a)
+withBasicAuth !p !user !pass f = do
+  inf <- openBasicAuth p user pass
   mask $ \restore -> do
     a <- onException (restore (f inf)) (disconnected inf)
     e <- disconnected inf
