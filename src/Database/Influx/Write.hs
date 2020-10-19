@@ -292,7 +292,7 @@ openBasicAuth Peer{address,port} !user !pass = do
 buildBasicAuthHeader :: Bytes -> Bytes -> ByteArray
 buildBasicAuthHeader !user !pass = Chunks.concatU $ Builder.run 256 $
   Builder.cstring (Ptr "Authorization: Basic "# ) <>
-  Base64.builder (Bytes.intercalateByte2 0x2E user pass) <>
+  Base64.builder (Bytes.intercalateByte2 0x3A user pass) <>
   Builder.fromBounded Nat.two (Bounded.append (Bounded.ascii '\r') (Bounded.ascii '\n'))
 
 -- | Close a connection to an 'Influx' instance.

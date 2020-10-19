@@ -7,8 +7,8 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/andrewthad/sockets
-  tag: 644b8b52aed4237eac2dd42eaf889753d4392ac4
+  tag: 8d9d433f1359119472149f3249ad1a6b82c04833
 source-repository-package
   type: git
-  location: https://github.com/byteverse/byteslice
-  tag: bc86f291283eaaa30f3d8095b7c8693ceb07c282
+  location: https://github.com/andrewthad/posix-api
+  tag: 0150c22f79e7cb769f5c09c13537f09a7842576a
