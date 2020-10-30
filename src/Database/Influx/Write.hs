@@ -42,7 +42,7 @@ import Control.Monad.Trans.Except (ExceptT(ExceptT),runExceptT)
 import Data.Bytes.Types (MutableBytes(..),Bytes)
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
-import Data.Primitive (ByteArray,MutableByteArray)
+import Data.Primitive (SmallArray,ByteArray,MutableByteArray)
 import Data.Primitive.ByteArray.Offset (MutableByteArrayOffset(..))
 import Data.Primitive.Unlifted.Array (MutableUnliftedArray(..))
 import Data.Primitive.Unlifted.Array (UnliftedArray)
@@ -305,9 +305,9 @@ close = disconnected
 write ::
      Influx -- ^ Connection to InfluxDB
   -> Database -- ^ Database name
-  -> Vector Point -- ^ Data points
+  -> SmallArray Point -- ^ Data points
   -> IO (Either InfluxException ())
-write !inf@(Influx _ peerDescr authHdr) (Database db) !points0 = case V.length points0 of
+write !inf@(Influx _ peerDescr authHdr) (Database db) !points0 = case Prelude.length points0 of
   0 -> pure (Right ())
   _ -> getConnection inf >>= \case
     Left err -> pure $! Left $! ConnectException err
