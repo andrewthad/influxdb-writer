@@ -26,7 +26,7 @@ library
     , byteslice >=0.2.4 && <0.3
     , bytestring >= 0.10 && < 0.11
     , influxdb-line-protocol >=0.1 && <0.2
-    , ip >=1.5 && <1.6
+    , ip >=1.5 && <1.8
     , natural-arithmetic >=0.1 && <0.2
     , primitive-addr >=0.1.0.1 && <0.2
     , primitive >=0.7 && <0.8
